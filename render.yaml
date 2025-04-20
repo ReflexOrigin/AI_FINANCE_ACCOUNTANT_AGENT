@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: finance-agent
+    runtime: python
+    buildCommand: |
+      pip install -r requirements.txt
+      python -c "
+from transformers import AutoModelForCausalLM; \
+AutoModelForCausalLM.from_pretrained('mistralai/Mistral-7B-Instruct-v0.3')"
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 8000
+    envVars:
+      - key: HF_HOME
+        value: /mnt/cache/huggingface
+    disk:
+      name: cache
+      mountPath: /mnt/cache
+      sizeGB: 10
