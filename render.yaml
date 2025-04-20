@@ -7,13 +7,9 @@ services:
       pip install -r requirements.txt
       python - <<EOF
 from transformers import AutoModelForCausalLM
-AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-Instruct-v0.3")
+AutoModelForCausalLM.from_pretrained("microsoft/phi-4")
 EOF
     # how to start your FastAPI/Uvicorn server
     startCommand: uvicorn main:app --host 0.0.0.0 --port 8000
     envVars:
       # override HF cache to /tmp (ephemeral but available at build)
-      - key: API_TOKEN
-        value: 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
-      - key: HF_HOME
-        value: /tmp/huggingface_cache
