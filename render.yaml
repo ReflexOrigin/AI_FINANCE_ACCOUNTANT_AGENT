@@ -2,16 +2,16 @@ services:
   - type: web
     name: finance-agent
     runtime: python
+    # 1) install dependencies, 2) pre‑download the HF model
     buildCommand: |
       pip install -r requirements.txt
-      python -c "
-from transformers import AutoModelForCausalLM; \
-AutoModelForCausalLM.from_pretrained('mistralai/Mistral-7B-Instruct-v0.3')"
+      python - <<EOF
+from transformers import AutoModelForCausalLM
+AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-Instruct-v0.3")
+EOF
+    # how to start your FastAPI/Uvicorn server
     startCommand: uvicorn main:app --host 0.0.0.0 --port 8000
     envVars:
+      # override HF cache to /tmp (ephemeral but available at build)
       - key: HF_HOME
-        value: /mnt/cache/huggingface
-    disk:
-      name: cache
-      mountPath: /mnt/cache
-      sizeGB: 10
+        value: /tmp/huggingface_cache
