@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_TIMEFRAME_SECONDS: int = Field(default=3600)
 
     # LLM settings
-    LLM_MODEL_NAME: str = Field(default="mistralai/Mistral-7B-Instruct-v0.3")
+    LLM_MODEL_NAME: str = Field(default="microsoft/phi-4")
     LLM_QUANTIZATION: str = Field(default="None")  # Options: 4bit, 8bit, none
     LLM_MAX_NEW_TOKENS: int = Field(default=512)
     LLM_TIMEOUT_SECONDS: int = Field(default=30)
