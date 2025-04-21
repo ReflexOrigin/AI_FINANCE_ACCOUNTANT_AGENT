@@ -1,29 +1,21 @@
 """
 LLM Module for Finance Accountant Agent
 
-This module handles the loading and inference of open-source Large Language Models
-from Hugging Face's Transformers library. It supports quantized models for
-efficient inference on consumer hardware.
+This module handles inference via the Hugging Face Inference API (or a local fallback),
+with support for quantized models and timeout handling.
 
 Features:
-- Model loading with quantization options (4-bit, 8-bit)
-- Async inference with timeout handling
-- Graceful fallback for complex queries
-- Caching for performance
-- Streaming response capability
-
-Dependencies:
-- transformers: Hugging Face's transformers library
-- torch: PyTorch for model inference
-- accelerate: For optimized inference
-- bitsandbytes: For quantization support
+- Hosted HF Inference API client
+- Local quantized model loading (4bit, 8bit, or none)
+- Attention mask & pad token handling
+- Async inference with timeout and fallback
+- Custom stopping criteria support
 """
 
+import httpx
 import asyncio
-import functools
 import logging
-import time
-from typing import Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 import torch
 from transformers import (
@@ -32,86 +24,101 @@ from transformers import (
     BitsAndBytesConfig,
     StoppingCriteria,
     StoppingCriteriaList,
-    TextIteratorStreamer,
 )
+from huggingface_hub import InferenceClient
 
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# Global model and tokenizer instances
+# Globals
 _model = None
 _tokenizer = None
-
+_inference_client: Optional[InferenceClient] = None
 
 class LLMTimeoutError(Exception):
-    """Exception raised when LLM inference times out."""
+    """Raised when inference times out."""
     pass
 
-
 class FinanceStoppingCriteria(StoppingCriteria):
-    """Custom stopping criteria for financial text generation."""
-
+    """Stop generation on specified tokens."""
     def __init__(self, stop_strings: List[str], tokenizer):
         self.stop_strings = stop_strings
         self.tokenizer = tokenizer
-
+       
     def __call__(self, input_ids, scores, **kwargs):
-        # Check if any of the stop strings appear in the generated text
-        generated_text = self.tokenizer.decode(input_ids[0])
-        for stop_string in self.stop_strings:
-            if stop_string in generated_text:
-                return True
-        return False
+        text = self.tokenizer.decode(input_ids[0])
+        return any(s in text for s in self.stop_strings)
 
 
-async def load_model():
-    """
-    Load the LLM model and tokenizer asynchronously.
+async def _call_deepinfra_api(prompt: str, max_tokens: int, temperature: float, top_p: float, stop: Optional[List[str]] = None) -> str:
+    headers = {
+        "Authorization": f"Bearer {settings.DEEPINFRA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "model": settings.LLM_MODEL_NAME,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+    }
+    if stop:
+        body["stop"] = stop
 
-    Returns:
-        tuple: (model, tokenizer)
-    """
+    try:
+        async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT_SECONDS) as client:
+            response = await client.post("https://api.deepinfra.com/v1/openai/chat/completions", headers=headers, json=body)
+            response.raise_for_status()
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.error(f"DeepInfra API error: {e}")
+        if settings.LLM_FALLBACK_ENABLED:
+            return settings.LLM_FALLBACK_TEXT
+        raise LLMTimeoutError(str(e))
+
+
+async def _get_inference_client() -> InferenceClient:
+    global _inference_client
+    if _inference_client is None:
+        logger.info(f"Initializing HF InferenceClient for {settings.LLM_MODEL_NAME}")
+        _inference_client = InferenceClient(
+            model=settings.LLM_MODEL_NAME,
+            token=settings.HF_HUB_TOKEN,
+            timeout=settings.LLM_TIMEOUT_SECONDS,
+        )
+    return _inference_client
+
+async def load_local_model():
+    """Load and cache a local quantized model and tokenizer."""
     global _model, _tokenizer
-
     if _model is None or _tokenizer is None:
-        logger.info(f"Loading LLM model: {settings.LLM_MODEL_NAME}")
-
-        # Configure quantization
-        quantization_config = None
-        if settings.LLM_QUANTIZATION == "4bit":
-            quantization_config = BitsAndBytesConfig(
+        _tokenizer = AutoTokenizer.from_pretrained(settings.LLM_MODEL_NAME)
+        if _tokenizer.pad_token_id is None:
+            _tokenizer.add_special_tokens({'pad_token': _tokenizer.eos_token})
+       
+        qconf = None
+        if settings.LLM_QUANTIZATION == '4bit':
+            qconf = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_quant_type="nf4",
+                bnb_4bit_quant_type='nf4',
                 bnb_4bit_use_double_quant=True,
             )
-        elif settings.LLM_QUANTIZATION == "8bit":
-            quantization_config = BitsAndBytesConfig(load_in_8bit=True)
-
-        loop = asyncio.get_event_loop()
-
-        # Load tokenizer
-        _tokenizer = await loop.run_in_executor(
-            None, lambda: AutoTokenizer.from_pretrained(settings.LLM_MODEL_NAME)
+        elif settings.LLM_QUANTIZATION == '8bit':
+            qconf = BitsAndBytesConfig(load_in_8bit=True)
+       
+        _model = AutoModelForCausalLM.from_pretrained(
+            settings.LLM_MODEL_NAME,
+            quantization_config=qconf,
+            device_map='auto',
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
         )
-
-        # Load model with quantization if specified
-        _model = await loop.run_in_executor(
-            None,
-            lambda: AutoModelForCausalLM.from_pretrained(
-                settings.LLM_MODEL_NAME,
-                quantization_config=quantization_config,
-                device_map="auto",
-                torch_dtype=torch.float16,
-                trust_remote_code=True,
-            ),
-        )
-
-        logger.info("LLM model loaded successfully")
-
-    return _model, _tokenizer
-
+       
+        _model.resize_token_embeddings(len(_tokenizer))
+        logger.info("Loaded local LLM model.")
 
 async def generate_text(
     prompt: str,
@@ -122,92 +129,100 @@ async def generate_text(
     stop_strings: Optional[List[str]] = None,
     stream: bool = False,
 ) -> Union[str, asyncio.StreamReader]:
-    """
-    Generate text using the loaded LLM.
-
-    Args:
-        prompt: The user prompt
-        system_prompt: Optional system prompt for instruction-tuned models
-        max_new_tokens: Maximum number of tokens to generate
-        temperature: Sampling temperature
-        top_p: Nucleus sampling parameter
-        stop_strings: List of strings that should trigger stopping
-        stream: Whether to stream the response
-
-    Returns:
-        Generated text or a stream of text chunks
-
-    Raises:
-        LLMTimeoutError: If inference times out
-    """
-    model, tokenizer = await load_model()
-
-    # Prepare the input prompt
-    if system_prompt:
-        input_text = f"<s>[INST] {system_prompt}\n\n{prompt} [/INST]"
-    else:
-        input_text = prompt
-
-    # Tokenize input
-    inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
-
-    # Configure generation parameters
-    gen_kwargs = {
-        "input_ids": inputs.input_ids,
-        "max_new_tokens": max_new_tokens or settings.LLM_MAX_NEW_TOKENS,
-        "temperature": temperature,
-        "top_p": top_p,
-        "do_sample": temperature > 0,
-    }
-
-    # Add stopping criteria if specified
+    """Generate text via HF Inference API or local fallback."""
+    full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+   
+    # Log the formatted prompt for debugging
+    logger.debug(f"Full prompt to LLM: {full_prompt[:200]}...")
+    
+    # Log the stop strings
     if stop_strings:
-        stopping_criteria = FinanceStoppingCriteria(stop_strings, tokenizer)
-        gen_kwargs["stopping_criteria"] = StoppingCriteriaList([stopping_criteria])
+        logger.debug(f"Using stop strings: {stop_strings}")
+    
+    if settings.USE_DEEPINFRA_API:
+        try:
+            return await _call_deepinfra_api(
+                prompt=full_prompt,
+                max_tokens=max_new_tokens or settings.LLM_MAX_NEW_TOKENS,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop_strings,
+            )
+        except Exception as e:
+            logger.error(f"DeepInfra call failed: {e}")
+            if settings.LLM_FALLBACK_ENABLED:
+                return settings.LLM_FALLBACK_TEXT
+            raise LLMTimeoutError(str(e))
 
+    # Hosted API path
+    if settings.USE_HF_INFERENCE_API:
+        client = await _get_inference_client()
+        try:
+            # Properly pass the stop_strings to the Inference API
+            result = await asyncio.to_thread(
+                client.text_generation,
+                prompt=full_prompt,
+                max_new_tokens=max_new_tokens or settings.LLM_MAX_NEW_TOKENS,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop_strings,  # Ensure stop_strings are passed correctly
+                stream=stream,
+            )
+           
+            logger.debug(f"HF API raw output: {result!r}")
+           
+            if isinstance(result, list):
+                return result[0].get('generated_text', '')
+            return result
+       
+        except Exception as e:
+            logger.error(f"Inference API error: {e}")
+            if settings.LLM_FALLBACK_ENABLED:
+                return settings.LLM_FALLBACK_TEXT
+            raise LLMTimeoutError(str(e))
+   
+    # Local fallback
+    await load_local_model()
+   
+    model, tokenizer = _model, _tokenizer
+   
+    inputs = tokenizer(
+        full_prompt,
+        return_tensors='pt',
+        padding='max_length',
+        truncation=True,
+        max_length=model.config.max_position_embeddings,
+    ).to(model.device)
+   
+    gen_kwargs = {
+        'input_ids': inputs.input_ids,
+        'attention_mask': inputs.attention_mask,
+        'pad_token_id': tokenizer.pad_token_id,
+        'max_new_tokens': max_new_tokens or settings.LLM_MAX_NEW_TOKENS,
+        'temperature': temperature,
+        'top_p': top_p,
+    }
+   
+    # Ensure stop_strings are properly handled for local generation
+    if stop_strings:
+        gen_kwargs['stopping_criteria'] = StoppingCriteriaList([
+            FinanceStoppingCriteria(stop_strings, tokenizer)
+        ])
+   
     try:
         loop = asyncio.get_event_loop()
-
-        if stream:
-            # Streaming setup
-            streamer = TextIteratorStreamer(tokenizer, skip_prompt=True)
-            gen_kwargs["streamer"] = streamer
-
-            # Create a stream reader/writer
-            stream_reader = asyncio.StreamReader()
-            stream_writer = asyncio.StreamReaderProtocol(stream_reader)
-            await loop.connect_read_pipe(lambda: stream_writer, asyncio.subprocess.PIPE)
-
-            # Kick off generation in executor
-            loop.run_in_executor(None, functools.partial(model.generate, **gen_kwargs))
-
-            # Feed tokens into the reader
-            for chunk in streamer:
-                stream_reader.feed_data(chunk.encode())
-            stream_reader.feed_eof()
-            return stream_reader
-
-        else:
-            # Synchronous generation with timeout
-            output_ids = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: model.generate(**gen_kwargs)),
-                timeout=settings.LLM_TIMEOUT_SECONDS,
-            )
-
-            # Skip the prompt tokens
-            prompt_length = inputs.input_ids.shape[1]
-            generated_ids = output_ids[0][prompt_length:]
-            generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-            return generated_text.strip()
-
+        output = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: model.generate(**gen_kwargs)),
+            timeout=settings.LLM_TIMEOUT_SECONDS,
+        )
+       
+        tokens = output[0][inputs.input_ids.size(1):]
+        generated_text = tokenizer.decode(tokens, skip_special_tokens=True).strip()
+        logger.debug(f"Local model generated: {generated_text[:200]}...")
+        return generated_text
+   
     except asyncio.TimeoutError:
-        logger.warning(f"LLM inference timed out after {settings.LLM_TIMEOUT_SECONDS}s")
+        logger.warning('Local LLM inference timed out.')
         if settings.LLM_FALLBACK_ENABLED:
             return settings.LLM_FALLBACK_TEXT
-        raise LLMTimeoutError(f"Inference timed out after {settings.LLM_TIMEOUT_SECONDS} seconds")
-
-    except Exception as e:
-        logger.error(f"Error during LLM inference: {str(e)}")
-        if settings.LLM_FALLBACK_ENABLED:
-            return settings.LLM_FALLBACK_TEXT
-        raise
+        raise LLMTimeoutError('Local inference timed out')

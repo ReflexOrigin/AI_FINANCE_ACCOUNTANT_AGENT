@@ -19,6 +19,7 @@ Dependencies:
 import asyncio
 import json
 import logging
+import re
 from typing import Dict, List, Optional, Union
 
 from modules.llm_module import generate_text
@@ -119,7 +120,10 @@ INTENT_RECOGNITION_PROMPT = """
 You are a financial intent recognition system. Your task is to analyze user queries
 and determine the specific finance-related intent and extract relevant entities.
 
-Respond with a JSON object that includes:
+IMPORTANT: Respond with a VALID JSON object only. Do not include any markdown formatting, 
+explanations, or code blocks. Just return the raw JSON.
+
+Your JSON response must include these exact keys:
 1. "intent": The primary intent category
 2. "subintent": The specific subintent
 3. "entities": Key-value pairs of extracted entities
@@ -130,17 +134,48 @@ Use the following finance intent taxonomy:
 
 Example:
 User: "What's our current cash position as of today?"
-Response:
-{
+Your response should be exactly:
+{{
   "intent": "cash_management",
   "subintent": "cash_position",
-  "entities": {
+  "entities": {{
     "date": "today",
     "type": "current"
-  },
+  }},
   "confidence": 0.95
-}
+}}
 """
+
+
+def extract_json_from_text(text: str) -> str:
+    """
+    Extract JSON from text, handling markdown code blocks and other formatting.
+    
+    Args:
+        text: The text containing JSON
+        
+    Returns:
+        Extracted JSON string
+    """
+    logger.debug(f"Attempting to extract JSON from: {text}")
+    
+    # First, try to find JSON in markdown code blocks
+    code_block_pattern = r"```(?:json)?\s*([\s\S]*?)```"
+    code_blocks = re.findall(code_block_pattern, text)
+    
+    if code_blocks:
+        return code_blocks[0].strip()
+    
+    # If no code blocks, try to find JSON between curly braces
+    # This regex finds the outermost JSON object
+    json_pattern = r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}"
+    json_matches = re.findall(json_pattern, text)
+    
+    if json_matches:
+        return json_matches[0].strip()
+    
+    # If all else fails, return the original text
+    return text.strip()
 
 
 async def recognize_intent(
@@ -174,25 +209,28 @@ async def recognize_intent(
             prompt=user_prompt,
             system_prompt=system_prompt,
             temperature=0.1,  # Low temperature for consistency
+            max_new_tokens=1024, # Ensure we get a complete response
         )
 
+        logger.debug(f"Raw LLM response: {response}")
+        
+        # Extract JSON from response
+        json_str = extract_json_from_text(response)
+        logger.debug(f"Extracted JSON string: {json_str}")
+        
         # Parse the JSON response
         try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            if json_start >= 0 and json_end > json_start:
-                json_str = response[json_start:json_end]
-                intent_data = json.loads(json_str)
-            else:
-                intent_data = json.loads(response)
-
-            # Ensure required fields
+            intent_data = json.loads(json_str)
+            
+            # Validate and ensure required fields
             for field in ("intent", "subintent", "entities", "confidence"):
                 if field not in intent_data:
-                    intent_data.setdefault("entities", {})
-                    intent_data.setdefault("confidence", 0.5)
-                    intent_data.setdefault("intent", "unknown")
-                    intent_data.setdefault("subintent", "unknown")
+                    if field == "entities":
+                        intent_data[field] = {}
+                    elif field == "confidence":
+                        intent_data[field] = 0.5
+                    else:
+                        intent_data[field] = "unknown"
 
             logger.info(
                 f"Recognized intent: {intent_data['intent']}/{intent_data['subintent']} "
@@ -201,11 +239,11 @@ async def recognize_intent(
             return intent_data
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse intent JSON: {e}, response: {response}")
+            logger.error(f"Failed to parse intent JSON: {e}, extracted JSON: {json_str}")
             return {
                 "intent": "unknown",
                 "subintent": "general_query",
-                "entities": {},
+                "entities": {"error_message": f"JSON parse error: {str(e)}"},
                 "confidence": 0.1,
                 "raw_response": response,
             }

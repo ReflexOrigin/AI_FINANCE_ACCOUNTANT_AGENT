@@ -17,14 +17,12 @@ Configuration categories:
 
 import os
 from pathlib import Path
-from typing import List, Optional, Union
-
+from typing import List, Optional
 from pydantic import BaseSettings, Field, root_validator
 
 class Settings(BaseSettings):
     DATA_DIR: Path = Path("data")
     RAG_VECTOR_STORE_PATH: Path = DATA_DIR / "vector_store"
-    # Base paths
     BASE_DIR: Path = Path(__file__).resolve().parent.parent
     MODEL_DIR: Path = Field(default=BASE_DIR / "models")
 
@@ -44,29 +42,37 @@ class Settings(BaseSettings):
     RATE_LIMIT_TIMEFRAME_SECONDS: int = Field(default=3600)
 
     # LLM settings
-    LLM_MODEL_NAME: str = Field(default="mistralai/Mistral-7B-Instruct-v0.2")
-    LLM_QUANTIZATION: str = Field(default="4bit")  # Options: 4bit, 8bit, none
-    LLM_MAX_NEW_TOKENS: int = Field(default=512)
-    LLM_TIMEOUT_SECONDS: int = Field(default=30)
+    LLM_MODEL_NAME: str = Field(default="mistralai/Mistral-7B-Instruct-v0.3")
+    LLM_QUANTIZATION: str = Field(default="none")  # Options: 4bit, 8bit, none
+    LLM_MAX_NEW_TOKENS: int = Field(default=32)
+    LLM_TIMEOUT_SECONDS: int = Field(default=100)
     LLM_FALLBACK_ENABLED: bool = Field(default=True)
     LLM_FALLBACK_TEXT: str = Field(
         default="I'm sorry, I couldn't process that request in time. Please try again with a simpler query."
     )
 
+    # Hugging Face Inference API
+    USE_HF_INFERENCE_API: bool = Field(default=True)
+    HF_HUB_TOKEN: Optional[str] = Field(default=None, env="HF_HUB_TOKEN")
+
+    # DeepInfra API settings
+    USE_DEEPINFRA_API: bool = Field(default=False)
+    DEEPINFRA_API_KEY: Optional[str] = Field(default=None, env="DEEPINFRA_API_KEY")
+
+
     # STT settings
-    STT_MODEL_SIZE: str = Field(default="base")  # Options: tiny, base, small, medium, large
-    STT_LANGUAGE: Optional[str] = Field(default=None)  # None for auto-detection
+    STT_MODEL_SIZE: str = Field(default="base")
+    STT_LANGUAGE: Optional[str] = Field(default=None)
 
     # TTS settings
     ENABLE_TTS: bool = Field(default=True)
-    TTS_ENGINE: str = Field(default="pyttsx3")  # Options: mozilla, pyttsx3
+    TTS_ENGINE: str = Field(default="pyttsx3")
     TTS_VOICE_ID: Optional[str] = Field(default=None)
     TTS_SPEECH_RATE: float = Field(default=1.0)
 
     # RAG settings
     RAG_ENABLED: bool = Field(default=True)
     RAG_EMBEDDING_MODEL: str = Field(default="sentence-transformers/all-MiniLM-L6-v2")
-    RAG_VECTOR_STORE_PATH: Path = Field(default=DATA_DIR / "vector_store")
     RAG_CHUNK_SIZE: int = Field(default=512)
     RAG_CHUNK_OVERLAP: int = Field(default=50)
     RAG_TOP_K: int = Field(default=5)
@@ -78,7 +84,7 @@ class Settings(BaseSettings):
     BANKING_API_SECRET: Optional[str] = Field(default=None)
     USE_DUMMY_BANKING_API: bool = Field(default=True)
 
-    # File management settings
+    # File management
     MAX_UPLOAD_SIZE_MB: int = Field(default=10)
     ALLOWED_FILE_TYPES: List[str] = Field(
         default=[".pdf", ".docx", ".xlsx", ".csv", ".txt"]
@@ -86,18 +92,12 @@ class Settings(BaseSettings):
 
     @root_validator
     def create_directories(cls, values):
-        """Ensure required directories exist."""
         data_dir = values.get("DATA_DIR")
         model_dir = values.get("MODEL_DIR")
-        vector_store_path = values.get("RAG_VECTOR_STORE_PATH")
-
-        if data_dir:
-            os.makedirs(data_dir, exist_ok=True)
-        if model_dir:
-            os.makedirs(model_dir, exist_ok=True)
-        if vector_store_path:
-            os.makedirs(vector_store_path, exist_ok=True)
-
+        vector_store = values.get("RAG_VECTOR_STORE_PATH")
+        os.makedirs(data_dir, exist_ok=True)
+        os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(vector_store, exist_ok=True)
         return values
 
     class Config:
@@ -105,11 +105,10 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         case_sensitive = True
 
-
-# Create settings instance
+# instantiate
 settings = Settings()
 
-# Ensure directories exist
+# ensure directories
 os.makedirs(settings.DATA_DIR, exist_ok=True)
 os.makedirs(settings.MODEL_DIR, exist_ok=True)
 os.makedirs(settings.RAG_VECTOR_STORE_PATH, exist_ok=True)
