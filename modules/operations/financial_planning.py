@@ -263,10 +263,61 @@ async def handle_financial_target(entities: Dict[str, Any]) -> Dict[str, Any]:
         logger.error(f"Error in financial_target: {e}")
         return {"error": str(e), "_metadata": {"operation": "financial_planning/financial_target", "success": False}}
 
+
+# New handler for variance analysis
+async def handle_variance_analysis(entities: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compare actual vs. budget figures and compute variance analysis.
+
+    Expected entities:
+      - metric: e.g. "Operating Expenses"
+      - period_actual: e.g. "Q1 2025"
+      - period_budget: e.g. "FY 2025 Budget"
+    """
+    metric = entities.get("metric", "total expenses")
+    period_actual = entities.get("period_actual", "current period")
+    period_budget = entities.get("period_budget", "budget period")
+
+    query = f"{metric} actuals for {period_actual} vs budget for {period_budget}"
+    system_prompt = (
+        f"You are a financial analyst. Compute the absolute and percentage variance "
+        f"for {metric} comparing {period_actual} against {period_budget}, "
+        "and provide commentary on key drivers."
+    )
+    augmented_prompt = await rag_module.augment_prompt(query, system_prompt)
+
+    analysis = await generate_text(
+        prompt=query,
+        system_prompt=augmented_prompt,
+        temperature=0.2
+    )
+
+    import json, re
+    m = re.search(r'\{.*\}', analysis, re.DOTALL)
+    if m:
+        try:
+            result = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            result = {"commentary": analysis.strip()}
+    else:
+        result = {"commentary": analysis.strip()}
+
+    return {
+        "metric": metric,
+        "period_actual": period_actual,
+        "period_budget": period_budget,
+        **result,
+        "_metadata": {
+            "operation": "financial_planning/variance_analysis",
+            "success": not bool(result.get("error"))
+        }
+    }
+
 __all__ = [
     "handle_budget_preparation",
     "handle_forecast_update",
     "handle_scenario_analysis",
     "handle_capital_planning",
-    "handle_financial_target"
+    "handle_financial_target",
+    "handle_variance_analysis"
 ]

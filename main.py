@@ -21,19 +21,21 @@ import asyncio
 import logging
 import os
 from typing import Dict, List, Optional, Union
-
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+import json
+from fastapi import Depends, FastAPI, File, UploadFile, HTTPException
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config.settings import settings
-from modules.voice_input import process_voice_input
+from modules.voice_input import process_voice_input, process_live_voice_initialize, process_live_voice_chunk, process_live_voice_final
 from modules.intent_recognition import recognize_intent
 from modules.operation_manager import OperationManager
 from modules.file_manager import ingest_file
 from modules.response_generation import generate_text_response, text_to_speech
 from modules.security import authenticate_user, get_current_user
+from fastapi import WebSocket, WebSocketDisconnect
 
 # Configure logging
 logging.basicConfig(level=settings.LOG_LEVEL)
@@ -70,6 +72,9 @@ class VoiceQueryResponse(BaseModel):
     response_text: str
     audio_url: Optional[str] = None
 
+class AuthPayload(BaseModel):
+    username: str
+    password: str
 
 # Routes
 @app.get("/")
@@ -79,9 +84,8 @@ async def root():
 
 
 @app.post("/auth/token")
-async def login(username: str = Form(...), password: str = Form(...)):
-    """Authenticate user and return access token."""
-    token = await authenticate_user(username, password)
+async def login(payload: AuthPayload):
+    token = await authenticate_user(payload.username, payload.password)
     if not token:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
     return {"access_token": token, "token_type": "bearer"}
@@ -89,7 +93,8 @@ async def login(username: str = Form(...), password: str = Form(...)):
 
 @app.post("/voice/query", response_model=VoiceQueryResponse)
 async def voice_query(
-    audio_file: UploadFile = File(...), current_user=Depends(get_current_user)
+    audio_file: UploadFile = File(...),
+    current_user=Depends(get_current_user)
 ):
     """Process voice query and return text response with optional audio."""
     try:
@@ -102,21 +107,27 @@ async def voice_query(
         # Route to appropriate operation
         response = await operation_manager.execute_operation(intent_data)
 
-        # Generate response
+        # Generate text response
         response_text = await generate_text_response(response)
+
+        # Ensure it's a string
+        if not isinstance(response_text, str):
+            response_text = json.dumps(response_text, indent=2)
 
         # Optional TTS
         audio_url = None
         if settings.ENABLE_TTS:
             audio_content = await text_to_speech(response_text)
-            # TODO: Handle storing/serving audio file
+            # TODO: handle storing/serving audio file and set audio_url accordingly
 
+        # Return final payload
         return {
             "text": transcript,
             "intent": intent_data["intent"],
             "response_text": response_text,
             "audio_url": audio_url
         }
+
     except Exception as e:
         logger.error(f"Error processing voice query: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -156,6 +167,35 @@ async def upload_file(
     except Exception as e:
         logger.error(f"Error ingesting file: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.websocket("/voice/live")
+async def live_voice(websocket: WebSocket):
+    """
+    WebSocket endpoint to receive raw audio frames and send back incremental transcription.
+    """
+    await websocket.accept()
+    try:
+        # init streaming recognizer
+        streamer = await process_live_voice_initialize()
+        while True:
+            try:
+                audio_chunk = await asyncio.wait_for(websocket.receive_bytes(), timeout=10)
+                partial = await process_live_voice_chunk(streamer, audio_chunk)
+                if partial:
+                    await websocket.send_json({"partial": partial})
+            except asyncio.TimeoutError:
+                logger.warning("Client heartbeat timeout.")
+                break
+            except Exception as e:
+                logger.error(f"Error during live voice streaming: {e}")
+                break
+    except WebSocketDisconnect:
+        # on close, flush
+        final_text = await process_live_voice_final(streamer)
+        await websocket.send_json({"final": final_text})
+    finally:
+        await websocket.close()
 
 
 if __name__ == "__main__":

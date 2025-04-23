@@ -52,17 +52,23 @@ class Settings(BaseSettings):
     )
 
     # Hugging Face Inference API
-    USE_HF_INFERENCE_API: bool = Field(default=True)
+    USE_HF_INFERENCE_API: bool = Field(default=False)
     HF_HUB_TOKEN: Optional[str] = Field(default=None, env="HF_HUB_TOKEN")
 
     # DeepInfra API settings
-    USE_DEEPINFRA_API: bool = Field(default=False)
+    USE_DEEPINFRA_API: bool = Field(default=True)
     DEEPINFRA_API_KEY: Optional[str] = Field(default=None, env="DEEPINFRA_API_KEY")
 
 
     # STT settings
     STT_MODEL_SIZE: str = Field(default="base")
     STT_LANGUAGE: Optional[str] = Field(default=None)
+
+    # Live STT settings
+    ENABLE_LIVE_STT: bool = Field(default=True)
+    LIVE_STT_BUFFER_MS: int = Field(default=500)
+    LIVE_STT_SAMPLE_RATE: int = Field(default=16000)
+    LIVE_STT_FORMAT: str = Field(default="pcm_s16le")
 
     # TTS settings
     ENABLE_TTS: bool = Field(default=True)
