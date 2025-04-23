@@ -42,3 +42,4 @@ passlib[bcrypt]>=1.7.4
 # TTS
 pyttsx3>=2.90
 
+faster-whisper>=0.1.3
